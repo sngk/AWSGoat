@@ -1,15 +1,13 @@
 name: 'Terraform Apply'
-
-
 on:
   workflow_dispatch:
     inputs:
       module:
         type: choice
         description: "Select which module to deploy"
-        options: 
-        - module-1
-        - module-2
+        options:
+          - module-1
+          - module-2
         required: true
 
 permissions: write-all
@@ -19,82 +17,77 @@ jobs:
     name: 'Terraform'
     runs-on: ubuntu-latest
     environment: production
-    env: 
+    env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_REGION: "us-east-1"
-
     defaults:
       run:
         shell: bash
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Set up Terraform
-      uses: hashicorp/setup-terraform@v2
-      with:
-        terraform_version: 1.10.5
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.10.5
 
-    - name: Set Account ID
-      id: account
-      run: |
-        echo "ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_ENV
+      - name: Set Account ID
+        run: |
+          echo "ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> "$GITHUB_ENV"
+          echo "TFSTATE_KEY=${{ github.event.inputs.module }}.tfstate" >> "$GITHUB_ENV"
 
-    - name: Check previous AWSGoat Deployment
-      id: check 
-      run: |
-        echo ${{ env.ACCOUNT_ID }}
-        aws s3api head-object --bucket do-not-delete-awsgoat-state-files-${{ env.ACCOUNT_ID }} --key terraform.tfstate
-      continue-on-error: true
+      - name: Check previous AWSGoat Deployment
+        id: check
+        continue-on-error: true
+        run: |
+          aws s3api head-object \
+            --bucket "do-not-delete-awsgoat-state-files-${ACCOUNT_ID}" \
+            --key "${TFSTATE_KEY}"
 
-    - name: Exit if previous deployment exists
-      if: steps.check.outcome == 'success' 
-      run: |
-        echo "A Previous AWSGoat deployment exists, run the Terraform Destroy Action"
-        exit 1
+      - name: Exit if previous deployment exists
+        if: steps.check.outcome == 'success'
+        run: |
+          echo "A previous deployment exists for ${{ github.event.inputs.module }}. Run Terraform Destroy first."
+          exit 1
 
-    # Initialize a new or existing Terraform working directory 
-    - name: Terraform Init
-      run: | 
-        cd modules/${{ github.event.inputs.module }}
-        terraform init 
-        
-    # Installs boto3
-    - uses: actions/setup-python@v5
-      with:
-        python-version: 3
-    - name: install
-      run: |
-        pip install boto3
-    
-    - name: Terraform Plan
-      id: plan 
-      run: | 
-        cd modules/${{ github.event.inputs.module }}
-        terraform plan -input=false
-      continue-on-error: false
-      
-    - name: Terraform Plan Status
-      if: steps.plan.outcome == 'failure'
-      run: exit 1
-    
-    - name: Terraform Apply
-      run: | 
-        cd modules/${{ github.event.inputs.module }}
-        terraform apply -auto-approve -input=false
-      continue-on-error: false
+      - name: Terraform Init
+        run: |
+          cd "modules/${{ github.event.inputs.module }}"
+          terraform init
 
-    # Copy tfstate file to s3 bucket
-    - name: Copy terraform.tfstate file to s3bucket
-      if: always()
-      run: |
-        cd modules/${{ github.event.inputs.module }}
-        aws s3 cp ./terraform.tfstate s3://do-not-delete-awsgoat-state-files-${{ env.ACCOUNT_ID }}/terraform.tfstate 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3
 
-    # Terraform Output the API Gateway url
-    - name: Application URL
-      run: |
-        cd modules/${{ github.event.inputs.module }}
-        terraform output
+      - name: Install boto3
+        run: |
+          pip install boto3
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd "modules/${{ github.event.inputs.module }}"
+          terraform plan -input=false
+
+      - name: Terraform Apply
+        run: |
+          cd "modules/${{ github.event.inputs.module }}"
+          terraform apply -auto-approve -input=false
+
+      - name: Copy terraform.tfstate file to s3 bucket
+        if: always()
+        run: |
+          cd "modules/${{ github.event.inputs.module }}"
+          if [ -f ./terraform.tfstate ]; then
+            aws s3 cp ./terraform.tfstate "s3://do-not-delete-awsgoat-state-files-${ACCOUNT_ID}/${TFSTATE_KEY}"
+          else
+            echo "No local terraform.tfstate found; skipping upload."
+          fi
+
+      - name: Application URL
+        run: |
+          cd "modules/${{ github.event.inputs.module }}"
+          terraform output
