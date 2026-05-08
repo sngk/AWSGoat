@@ -1,14 +1,13 @@
 name: 'Terraform Destroy'
-
 on:
   workflow_dispatch:
     inputs:
       module:
         type: choice
         description: "Select which module to destroy"
-        options: 
-        - module-1
-        - module-2
+        options:
+          - module-1
+          - module-2
         required: true
 
 permissions: write-all
@@ -18,44 +17,63 @@ jobs:
     name: 'Terraform'
     runs-on: ubuntu-latest
     environment: production
-    env: 
+    env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_REGION: "us-east-1"
-
     defaults:
       run:
         shell: bash
 
     steps:
-    # Checkout the repository to the GitHub Actions runner
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Set up Terraform
-      uses: hashicorp/setup-terraform@v2
-      with:
-        terraform_version: 1.10.5
-    
-    - name: Set Account ID
-      id: account
-      run: |
-        echo "ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_ENV
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.10.5
 
-    # Copy and delete terraform.tfstate files from s3 bucket
-    - name: Retrieve tfstate
-      run: |
-        cd modules/${{ github.event.inputs.module }}
-        aws s3 cp s3://do-not-delete-awsgoat-state-files-${{ env.ACCOUNT_ID }}/terraform.tfstate ./terraform.tfstate
+      - name: Set Account ID
+        run: |
+          echo "ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> "$GITHUB_ENV"
+          echo "TFSTATE_KEY=${{ github.event.inputs.module }}.tfstate" >> "$GITHUB_ENV"
 
-    # Initialize a new Terraform working directory
-    - name: Terraform Init
-      run: |
-        cd modules/${{ github.event.inputs.module }}
-        terraform init
-    
-    - name: Terraform Destroy
-      run: |
-        cd modules/${{ github.event.inputs.module }}
-        terraform destroy -auto-approve -input=false
-      continue-on-error: false
+      - name: Check tfstate
+        id: state
+        run: |
+          if aws s3api head-object \
+            --bucket "do-not-delete-awsgoat-state-files-${ACCOUNT_ID}" \
+            --key "${TFSTATE_KEY}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: No remote state
+        if: steps.state.outputs.exists != 'true'
+        run: |
+          echo "No remote state exists for ${{ github.event.inputs.module }}. Nothing to destroy."
+
+      - name: Retrieve tfstate
+        if: steps.state.outputs.exists == 'true'
+        run: |
+          cd "modules/${{ github.event.inputs.module }}"
+          aws s3 cp "s3://do-not-delete-awsgoat-state-files-${ACCOUNT_ID}/${TFSTATE_KEY}" ./terraform.tfstate
+
+      - name: Terraform Init
+        if: steps.state.outputs.exists == 'true'
+        run: |
+          cd "modules/${{ github.event.inputs.module }}"
+          terraform init
+
+      - name: Terraform Destroy
+        if: steps.state.outputs.exists == 'true'
+        run: |
+          cd "modules/${{ github.event.inputs.module }}"
+          terraform destroy -auto-approve -input=false
+
+      - name: Delete remote state
+        if: steps.state.outputs.exists == 'true'
+        run: |
+          aws s3 rm "s3://do-not-delete-awsgoat-state-files-${ACCOUNT_ID}/${TFSTATE_KEY}"
